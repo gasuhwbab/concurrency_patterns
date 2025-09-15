@@ -1,0 +1,44 @@
+// Generator: function that returns a channel
+package main
+
+import (
+	"fmt"
+	"math/rand"
+	"time"
+)
+
+func main() {
+	fmt.Printf("\nExample one\n")
+	example_one()
+	fmt.Printf("\n\nExample two\n")
+	example_two()
+}
+
+func example_one() {
+	c := boring("boring") // function returning the channel
+	for i := 0; i < 5; i++ {
+		fmt.Printf("You say: %q\n", <-c)
+	}
+	fmt.Println("You're boring; I'm leaving.")
+}
+
+func example_two() {
+	joe := boring("joe")
+	ann := boring("ann")
+	for i := 0; i < 5; i++ {
+		fmt.Println(<-joe)
+		fmt.Println(<-ann)
+	}
+	fmt.Println("You're both boring; I'm leaving.")
+}
+
+func boring(msg string) <-chan string {
+	c := make(chan string)
+	go func() {
+		for i := 0; ; i++ {
+			c <- fmt.Sprintf("%s %d", msg, i)
+			time.Sleep(time.Duration(rand.Intn(1e3)) * time.Millisecond)
+		}
+	}()
+	return c
+}
