@@ -5,6 +5,8 @@ import (
 	"time"
 )
 
+const maxPending = 10
+
 type Item struct {
 	Title, Channel, Guid string
 }
@@ -35,16 +37,27 @@ type sub struct {
 	closing chan chan error
 }
 
+type fetchResult struct {
+	fetched []Item
+	next    time.Time
+	err     error
+}
+
 func (s *sub) loop() {
 	var pending []Item
 	var next time.Time
+	var seen = make(map[string]bool)
+	var fetchDone chan fetchResult
 	var err error
 	for {
 		var fetchDelay time.Duration
 		if now := time.Now(); next.After(now) {
 			fetchDelay = next.Sub(now)
 		}
-		startFetch := time.After(fetchDelay)
+		var startFetch <-chan time.Time
+		if fetchDone == nil && len(pending) < maxPending {
+			startFetch = time.After(fetchDelay) // enable featch case
+		}
 
 		var firstItem Item
 		//var updates chan Item
@@ -59,13 +72,23 @@ func (s *sub) loop() {
 			close(s.updates)
 			return
 		case <-startFetch:
-			var fetched []Item
-			fetched, _, err := s.fetcher.Fetch()
-			if err != nil {
-				// next = time.Now().Add(10 * time.Second)
+			fetchDone = make(chan fetchResult, 1)
+			go func() {
+				fetched, next, err := s.fetcher.Fetch()
+				fetchDone <- fetchResult{fetched: fetched, next: next, err: err}
+			}()
+		case result := <-fetchDone:
+			fetchDone = nil
+			if result.err != nil {
+				result.next = time.Now().Add(10 * time.Second)
 				break
 			}
-			pending = append(pending, fetched...)
+			for _, it := range result.fetched {
+				if !seen[it.Guid] {
+					pending = append(pending, it)
+					seen[it.Guid] = true
+				}
+			}
 		case s.updates <- firstItem:
 			pending = pending[1:]
 		}
@@ -82,16 +105,55 @@ func (s *sub) Close() error {
 	return <-errc
 }
 
+type merge struct {
+	subs    []Subscription
+	updates chan Item
+	quit    chan struct{}
+	errs    chan error
+}
+
 func Merge(subs ...Subscription) Subscription {
-	s := new(sub)
+	m := &merge{
+		subs:    subs,
+		updates: make(chan Item),
+		quit:    make(chan struct{}),
+		errs:    make(chan error),
+	}
 	for _, sub := range subs {
-		go func(sub Subscription) {
-			for it := range sub.Updates() {
-				s.updates <- it
+		go func(s Subscription) {
+			for {
+				var it Item
+				select {
+				case <-s.Updates():
+				case <-m.quit:
+					m.errs <- s.Close()
+					return
+				}
+				select {
+				case m.updates <- it:
+				case <-m.quit:
+					m.errs <- s.Close()
+					return
+				}
 			}
 		}(sub)
 	}
-	return s
+	return m
+}
+
+func (m *merge) Updates() <-chan Item {
+	return m.updates
+}
+
+func (m *merge) Close() error {
+	close(m.quit)
+	for range m.subs {
+		if err := <-m.errs; err != nil {
+			return err
+		}
+	}
+	close(m.updates)
+	return nil
 }
 
 func main() {
